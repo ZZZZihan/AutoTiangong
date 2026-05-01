@@ -5,6 +5,8 @@
 config.local.json
 config.*.json
 !config.example.json
+.autotiangong-active-account.json
+.autotiangong-traffic.json
 .omx/
 .venv/
 __pycache__/

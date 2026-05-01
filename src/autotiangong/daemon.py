@@ -6,8 +6,13 @@ import os
 import sys
 import time
 
-from .config import load_config, load_env_file, require_secret
+from .accounts import AccountCredentials, AccountRegistry
+from .config import AppConfig, load_config, load_env_file
+from .notifier import NotificationEvent, Notifier
 from .portal import CampusPortal
+from .traffic import TrafficGuard
+
+TRAFFIC_LIMIT_EXIT_CODE = 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,6 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     load_env_file(args.env_file)
     config = load_config(args.config)
     portal = CampusPortal(config)
+    accounts = AccountRegistry(config.login)
+    traffic_guard = TrafficGuard(config.traffic_guard)
+    notifier = Notifier(config.notifications)
 
     if args.interval is not None:
         interval = args.interval
@@ -27,37 +35,129 @@ def main(argv: list[str] | None = None) -> int:
         interval = config.check_interval_seconds
 
     while True:
-        exit_code = _run_once(portal, config, args.dry_run)
-        if args.once:
+        exit_code = _run_once(portal, config, args.dry_run, traffic_guard, accounts, notifier)
+        if args.once or exit_code == TRAFFIC_LIMIT_EXIT_CODE:
             return exit_code
         time.sleep(interval)
 
 
-def _run_once(portal: CampusPortal, config, dry_run: bool) -> int:
+def _run_once(
+    portal: CampusPortal,
+    config: AppConfig,
+    dry_run: bool,
+    traffic_guard: TrafficGuard | None = None,
+    accounts: AccountRegistry | None = None,
+    notifier: Notifier | None = None,
+) -> int:
+    accounts = accounts or AccountRegistry(config.login)
+    notifier = notifier or Notifier(config.notifications)
+
+    if traffic_guard and traffic_guard.enabled:
+        status = traffic_guard.check()
+        log_fn = logging.info if status.ok else logging.error
+        log_fn("%s", status.message)
+        if not status.ok:
+            return _stop_for_limit(
+                portal,
+                accounts,
+                notifier,
+                dry_run,
+                "AutoTiangong stopped by traffic guard",
+                status.message,
+                account_label=status.account_label,
+                used_bytes=status.used_bytes,
+                limit_bytes=status.limit_bytes,
+            )
+
     if portal.is_online():
         logging.info("Network is online; login not needed.")
         return 0
 
     logging.info("Connectivity check indicates captive/offline network; attempting login.")
     if dry_run:
-        username = os.environ.get(config.login.username_env, "dry-run-user")
-        password = os.environ.get(config.login.password_env, "dry-run-password")
+        credentials = accounts.credentials(dry_run=True)
     else:
         try:
-            username = require_secret(config.login.username_env)
-            password = require_secret(config.login.password_env)
+            credentials = accounts.credentials()
         except RuntimeError as exc:
             logging.error("%s", exc)
             return 2
 
-    result = portal.login(username, password, dry_run=dry_run)
+    logging.info("Using authorized account id: %s", credentials.id)
+    result = portal.login(credentials.username, credentials.password, dry_run=dry_run)
     log_fn = logging.info if result.ok else logging.error
     log_fn("%s (status=%s url=%s)", result.message, result.status, result.url)
+    if result.quota_limited:
+        logging.error("Account quota limit was detected; automatic account switching is not performed.")
+        return _stop_for_limit(
+            portal,
+            accounts,
+            notifier,
+            dry_run,
+            "AutoTiangong stopped by account quota limit",
+            result.message,
+            credentials=credentials,
+        )
+    if result.ok and traffic_guard and traffic_guard.enabled and not dry_run:
+        status = traffic_guard.activate(credentials.username)
+        log_fn = logging.info if status.ok else logging.error
+        log_fn("%s", status.message)
+        if not status.ok:
+            return _stop_for_limit(
+                portal,
+                accounts,
+                notifier,
+                dry_run,
+                "AutoTiangong stopped by traffic guard",
+                status.message,
+                credentials=credentials,
+                account_label=status.account_label,
+                used_bytes=status.used_bytes,
+                limit_bytes=status.limit_bytes,
+            )
     return 0 if result.ok else 1
 
 
+def _stop_for_limit(
+    portal: CampusPortal,
+    accounts: AccountRegistry,
+    notifier: Notifier,
+    dry_run: bool,
+    title: str,
+    message: str,
+    credentials: AccountCredentials | None = None,
+    account_label: str | None = None,
+    used_bytes: int | None = None,
+    limit_bytes: int | None = None,
+) -> int:
+    if credentials is None:
+        try:
+            credentials = accounts.credentials(dry_run=dry_run)
+        except RuntimeError as exc:
+            logging.error("Could not load active account credentials for logout: %s", exc)
+
+    account_id = credentials.id if credentials else accounts.current_account_id()
+    if credentials is not None and portal.config.logout.enabled:
+        logout_result = portal.logout(credentials.username, dry_run=dry_run)
+        log_fn = logging.info if logout_result.ok else logging.error
+        log_fn("%s (status=%s url=%s)", logout_result.message, logout_result.status, logout_result.url)
+
+    event = NotificationEvent(
+        title=title,
+        message=message,
+        account_id=account_id,
+        account_label=account_label,
+        used_bytes=used_bytes,
+        limit_bytes=limit_bytes,
+    )
+    for result in notifier.send(event):
+        log_fn = logging.info if result.ok else logging.error
+        log_fn("Notification %s: %s", result.target, result.message)
+    return TRAFFIC_LIMIT_EXIT_CODE
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Authorized single-account Dr.COM auto-login demo.")
+    parser = argparse.ArgumentParser(description="Authorized Dr.COM campus portal guard.")
     parser.add_argument("--config", default=os.environ.get("AUTOTIANGONG_CONFIG", "config.local.json"))
     parser.add_argument("--env-file", default=os.environ.get("AUTOTIANGONG_ENV_FILE", ".env"))
     parser.add_argument("--once", action="store_true", help="Run one check/login cycle and exit.")

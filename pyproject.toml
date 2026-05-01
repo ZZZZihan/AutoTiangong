@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autotiangong"
 version = "0.1.0"
-description = "Authorized single-account campus portal auto-login demo."
+description = "Authorized campus portal guard with manual lab account selection."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
 autotiangong-net = "autotiangong.daemon:main"
+autotiangong-switch-account = "autotiangong.switch_account:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

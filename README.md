@@ -2,17 +2,20 @@
 
 Authorized campus portal guard for a lab gateway or a personal machine.
 
-This project intentionally does **not** implement unattended multi-account rotation or quota bypass. It can register multiple lab-authorized accounts, but the daemon only uses the administrator-selected active account. When traffic guardrails or quota-limit portal messages are hit, it stops, optionally logs out, and notifies administrators for manual intervention.
+AutoTiangong can register multiple authorized accounts and optionally fail over when the portal/login response indicates the current account is unavailable, authentication failed, or the session is abnormal. Switching is driven by explicit portal/status signals, not by host traffic counters or a fixed local 4.9 GiB threshold.
 
 ## What it does
 
 - Detects captive portal status with an HTTP connectivity endpoint.
 - Parses Dr.COM portal settings from the landing page when available.
 - Sends a configurable Dr.COM login request with the administrator-selected authorized account.
+- Can optionally try the next registered account after login failure or configured account-unavailable markers.
+- Can mark unavailable accounts in local state, skip them for the current reset window, and restore them manually.
 - Supports a local registry of multiple authorized lab accounts without storing passwords in config or state.
+- Supports JSON or YAML config files.
 - Provides a manual account switch command for administrators.
 - Can stop automatically when local traffic for the current login session reaches a configured guardrail such as 4.9 GiB.
-- Can treat configured portal response text as an account quota-limit warning, optionally log out, notify admins, and stop instead of retrying.
+- Can treat configured portal response text such as quota, disabled-account, password-error, or session-error messages as account-unavailable signals.
 - Runs once for testing or continuously as a small background loop.
 - Keeps credentials out of code, config, logs, commits, and examples.
 
@@ -26,6 +29,12 @@ cp .env.example .env
 cp config.example.json config.local.json
 ```
 
+YAML configs are also supported:
+
+```bash
+cp config.example.yaml config.local.yaml
+```
+
 Edit `.env` locally:
 
 ```bash
@@ -33,6 +42,12 @@ CAMPUS_NET_USERNAME=your_authorized_lab_or_personal_account
 CAMPUS_NET_PASSWORD=your_password
 CAMPUS_NET_USERNAME_2=another_authorized_lab_account
 CAMPUS_NET_PASSWORD_2=another_password
+```
+
+If `login.accounts` is omitted, AutoTiangong can discover `_2`, `_3`, ... numbered env pairs after `load_env_file`, or you can define `AUTOTIANGONG_ACCOUNTS` as:
+
+```bash
+AUTOTIANGONG_ACCOUNTS=lab-primary:CAMPUS_NET_USERNAME:CAMPUS_NET_PASSWORD,lab-secondary:CAMPUS_NET_USERNAME_2:CAMPUS_NET_PASSWORD_2
 ```
 
 Run a safe dry run:
@@ -45,6 +60,12 @@ Run one real login attempt if the connectivity check fails:
 
 ```bash
 python -m autotiangong --config config.local.json --once
+```
+
+Force a login attempt after manually switching the active account:
+
+```bash
+python -m autotiangong --config config.local.json --once --force-login
 ```
 
 Run as a foreground loop:
@@ -77,11 +98,19 @@ Important fields:
 - `login.accounts`: authorized lab account IDs and their username/password environment variable names.
 - `login.active_account_id`: default account ID when no manual switch state exists.
 - `login.active_account_state_path`: local state file used by the manual switch command.
+- `login.kernel_port`: optional Dr.COM kernel port used when the rendered portal login falls back to `/drcom/login`; `null` means reuse `portal_url` host/port.
+- `login.fallback_to_kernel`: when true, tries the kernel login endpoint if the rendered ePortal response is inconclusive.
+- `login.auto_switch.enabled`: when true, tries each registered account once after login failure or account-unavailable markers.
+- `login.auto_switch.persist_success`: when true, records the account that succeeds after failover as the new active account.
+- `login.auto_switch.strategy`: `round_robin` starts from the current active account; `random` shuffles the configured pool each run.
+- `login.auto_switch.unavailable_state_path`: local state file for accounts temporarily marked unavailable.
+- `login.auto_switch.unavailable_reset_days`: number of days before an unavailable marker auto-expires; `1` means next-day reset.
 - `login.extra_fields`: non-secret Dr.COM parameters.
 - `login.username_env` and `login.password_env`: environment variable names used for secrets.
-- `login.quota_limit_markers`: response text snippets that mean the portal says the account has reached its quota.
-- `logout.enabled`: enables best-effort logout when the daemon stops for a quota or traffic guardrail.
-- `notifications.enabled`: enables webhook/email admin notifications when the daemon stops for a quota or traffic guardrail.
+- `login.account_unavailable_markers`: response text snippets that mark the current account unavailable and allow failover.
+- `login.quota_limit_markers`: backward-compatible quota snippets; these are also treated as account-unavailable signals.
+- `logout.enabled`: enables best-effort logout when the daemon stops for the optional local traffic guardrail.
+- `notifications.enabled`: enables webhook/email admin notifications for traffic guard stops and account-unavailable events.
 - `traffic_guard.enabled`: enables local traffic tracking for the current login session.
 - `traffic_guard.limit_gib`: local usage guardrail; `4.9` means 4.9 GiB.
 - `traffic_guard.interface`: optional network interface/adapter name. On Windows this is matched against the adapter name reported by `Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface`.
@@ -96,6 +125,15 @@ Register multiple lab-authorized accounts in `config.local.json`:
   "login": {
     "active_account_id": "lab-primary",
     "active_account_state_path": ".autotiangong-active-account.json",
+    "kernel_port": null,
+    "fallback_to_kernel": true,
+    "auto_switch": {
+      "enabled": false,
+      "persist_success": true,
+      "strategy": "round_robin",
+      "unavailable_state_path": ".autotiangong-unavailable-accounts.json",
+      "unavailable_reset_days": 1
+    },
     "accounts": [
       {
         "id": "lab-primary",
@@ -126,7 +164,41 @@ Add or update a 4.9 GiB guardrail in `config.local.json`:
 }
 ```
 
-When the guardrail is reached, or when a configured quota-limit marker appears in the portal response, the process exits with code `3`. It does not switch to another account automatically.
+When the optional local traffic guardrail is reached, the process exits with code `3`. Portal quota/unavailable messages are handled through `login.account_unavailable_markers`/`login.quota_limit_markers`: the current account is marked unavailable and auto-switch can try the next account.
+
+To enable automatic failover for account-unavailable and login-failure responses, set:
+
+```json
+{
+  "login": {
+    "auto_switch": {
+      "enabled": true,
+      "persist_success": true,
+      "strategy": "round_robin",
+      "unavailable_reset_days": 1
+    },
+    "account_unavailable_markers": [
+      "账号不可用",
+      "流量已用尽",
+      "已达上限",
+      "禁用",
+      "password error",
+      "authfail",
+      "会话异常"
+    ]
+  }
+}
+```
+
+The daemon starts with the current active account, skips accounts already marked unavailable, then tries each candidate once according to `strategy`. It skips accounts whose username/password environment variables are missing, writes account-unavailable markers to `login.auto_switch.unavailable_state_path`, and writes the first successful failover account to `login.active_account_state_path` only when `persist_success` is true.
+
+Inspect or clear unavailable markers:
+
+```bash
+python -m autotiangong.switch_account --config config.local.json --unavailable
+python -m autotiangong.switch_account --config config.local.json --restore lab-primary
+python -m autotiangong.switch_account --config config.local.json --restore-all
+```
 
 Enable notifications with webhook environment variables:
 
@@ -149,7 +221,11 @@ Webhook kinds supported by the standard library notifier are `generic`, `wecom`,
 
 ## Windows host
 
-The package uses only the Python standard library and can run on Windows with Python 3.10+:
+For a Windows machine that should run AutoTiangong all the time, use Windows Task Scheduler. This is the recommended production path because the process runs on the same host network stack as the browser.
+
+Full guide: [Windows Persistent Run Guide](docs/windows-persistent-run.md).
+
+The package can run on Windows with Python 3.10+:
 
 ```powershell
 py -3 -m venv .venv
@@ -165,17 +241,29 @@ For a foreground loop:
 .\.venv\Scripts\python.exe -m autotiangong --config config.local.json
 ```
 
-To keep it running after sign-in, create a Windows Scheduled Task that starts in the project directory and runs:
+To keep it running after sign-in, register the included scheduled task:
 
 ```powershell
-.\.venv\Scripts\python.exe -m autotiangong --config config.local.json
+.\scripts\install_windows_task.ps1 -RunAsCurrentUser -InstallDeps -StartNow
 ```
 
-Or register that task from the project directory:
+Logs are written to `logs\autotiangong.log`.
+
+To uninstall:
 
 ```powershell
-.\scripts\install_windows_task.ps1 -RunAsCurrentUser
+.\scripts\uninstall_windows_task.ps1 -StopFirst
 ```
+
+## Docker
+
+Docker artifacts are included for development or controlled deployments:
+
+```bash
+docker compose -f docker-compose.example.yml up --build
+```
+
+For Windows campus-portal use, prefer the Scheduled Task path unless you have verified Docker Desktop networking logs in as the same client identity the portal expects. Docker NAT can change IP/MAC behavior, and containerized traffic counters do not represent the Windows host adapter counters.
 
 ## Tests
 
@@ -186,8 +274,8 @@ PYTHONPATH=src python -m unittest discover -s tests
 ## Safety notes
 
 - Use only accounts you are authorized to automate.
-- Use the manual switch command only after administrator approval.
-- Do not enable unattended account rotation around school or ISP quota limits.
+- Use the manual switch command or automatic failover only for accounts you are authorized to operate.
+- Do not use unattended account switching to evade school, ISP, or organization policy.
 - Do not commit `.env`, `config.local.json`, or logs.
 - If a password was pasted into a chat, shell history, or log, rotate it.
 - For a shared lab, prefer an official lab/service account from the network office and follow local network management rules.

@@ -9,6 +9,8 @@ config.local.yaml
 config.*.yaml
 !config.example.yaml
 .autotiangong-active-account.json
+.autotiangong-daemon.pid
+.autotiangong-macos-wifi-trigger/
 .autotiangong-unavailable-accounts.json
 .autotiangong-traffic.json
 state/

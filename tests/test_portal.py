@@ -3,7 +3,12 @@ from email.message import Message
 
 from autotiangong.config import AppConfig, LoginConfig
 from autotiangong.http_client import HttpResponse
-from autotiangong.portal import _classify_kernel_login_response, _classify_login_response, _derive_logout_url
+from autotiangong.portal import (
+    _classify_kernel_login_response,
+    _classify_login_response,
+    _derive_logout_url,
+    _extract_session_uid,
+)
 
 
 class PortalClassificationTest(unittest.TestCase):
@@ -85,6 +90,14 @@ class PortalClassificationTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.account_unavailable)
         self.assertEqual(result.reason, "auth_failed")
+
+    def test_extracts_drcom_session_uid_from_portal_html(self):
+        self.assertEqual(_extract_session_uid("uid='2210610014';"), "2210610014")
+        self.assertEqual(_extract_session_uid('{"uid":"2210920829"}'), "2210920829")
+        self.assertEqual(_extract_session_uid("http://172.23.4.5/?uid=2510650220"), "2510650220")
+
+    def test_missing_drcom_session_uid_is_not_authenticated(self):
+        self.assertIsNone(_extract_session_uid("<!--Dr.COMWebLoginID_0.htm--><input name='DDDDD'>"))
 
 
 if __name__ == "__main__":

@@ -37,6 +37,16 @@ class LogoutResult:
     skipped: bool = False
 
 
+@dataclass(frozen=True)
+class PortalSessionStatus:
+    checked: bool
+    authenticated: bool
+    message: str
+    username: str | None = None
+    status: int | None = None
+    url: str | None = None
+
+
 class CampusPortal:
     def __init__(self, config: AppConfig, http: HttpClient | None = None) -> None:
         self.config = config
@@ -58,6 +68,42 @@ class CampusPortal:
             )
             return False
         return True
+
+    def session_status(self) -> PortalSessionStatus:
+        if self.config.login.mode.lower() != "drcom":
+            return PortalSessionStatus(
+                checked=False,
+                authenticated=False,
+                message=f"Unsupported session check mode: {self.config.login.mode}",
+            )
+
+        try:
+            response = self.http.get(self.config.portal_url)
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            return PortalSessionStatus(
+                checked=False,
+                authenticated=False,
+                message=f"Dr.COM session check failed: {exc}",
+            )
+
+        username = _extract_session_uid(f"{response.url}\n{response.text}")
+        if username:
+            return PortalSessionStatus(
+                checked=True,
+                authenticated=True,
+                message=f"Dr.COM session is active for {_mask_username(username)}.",
+                username=username,
+                status=response.status,
+                url=response.url,
+            )
+
+        return PortalSessionStatus(
+            checked=True,
+            authenticated=False,
+            message="Dr.COM portal did not report an active uid/session.",
+            status=response.status,
+            url=response.url,
+        )
 
     def login(self, username: str, password: str, dry_run: bool = False) -> LoginResult:
         if self.config.login.mode.lower() != "drcom":
@@ -293,6 +339,22 @@ def _extract_jsonp_payload(text: str) -> dict[str, object] | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _extract_session_uid(text: str) -> str | None:
+    patterns = [
+        r"(?:^|[^\w])uid\b\s*=\s*['\"]?([^'\"&;<>\s]+)",
+        r"['\"]uid['\"]\s*:\s*['\"]([^'\"]+)",
+        r"[?&]uid=([^&\s#]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        value = urllib.parse.unquote(match.group(1)).strip()
+        if value and value.casefold() not in {"0", "null", "undefined", "none"}:
+            return value
+    return None
 
 
 def _kernel_url(portal_url: str, port: int | None, path: str) -> str:

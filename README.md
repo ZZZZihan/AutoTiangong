@@ -7,6 +7,7 @@ AutoTiangong can register multiple authorized accounts and optionally fail over 
 ## What it does
 
 - Detects captive portal status with an HTTP connectivity endpoint.
+- Verifies Dr.COM portal session state before skipping login on an online network.
 - Parses Dr.COM portal settings from the landing page when available.
 - Sends a configurable Dr.COM login request with the administrator-selected authorized account.
 - Can optionally try the next registered account after login failure or configured account-unavailable markers.
@@ -73,6 +74,15 @@ Run as a foreground loop:
 ```bash
 python -m autotiangong --config config.local.json
 ```
+
+On macOS, install a Wi-Fi trigger that runs a lightweight AutoTiangong check
+while the current SSID is `360WiFi-E07A5C`:
+
+```bash
+./scripts/install_macos_wifi_launch_agent.sh --install-deps --start-now
+```
+
+See `docs/macos-wifi-trigger.md` for logs, retry behavior, and uninstall steps.
 
 List configured accounts:
 
@@ -164,7 +174,7 @@ Add or update a 4.9 GiB guardrail in `config.local.json`:
 }
 ```
 
-When the optional local traffic guardrail is reached, the process exits with code `3`. Portal quota/unavailable messages are handled through `login.account_unavailable_markers`/`login.quota_limit_markers`: the current account is marked unavailable and auto-switch can try the next account.
+When the optional local traffic guardrail is reached, the process exits with code `3` unless `login.auto_switch.enabled` is true. With auto-switch enabled, the current account is marked unavailable for the reset window and AutoTiangong immediately tries the next configured account. Portal quota/unavailable messages are handled through `login.account_unavailable_markers`/`login.quota_limit_markers`: the current account is marked unavailable and auto-switch can try the next account.
 
 To enable automatic failover for account-unavailable and login-failure responses, set:
 

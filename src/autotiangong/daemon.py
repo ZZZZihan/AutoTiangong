@@ -53,32 +53,76 @@ def _run_once(
 ) -> int:
     accounts = accounts or AccountRegistry(config.login)
     notifier = notifier or Notifier(config.notifications)
+    force_account_rotation = False
 
     if traffic_guard and traffic_guard.enabled:
         status = traffic_guard.check()
         log_fn = logging.info if status.ok else logging.error
         log_fn("%s", status.message)
         if not status.ok:
-            return _stop_for_limit(
-                portal,
-                accounts,
-                notifier,
-                dry_run,
-                "AutoTiangong stopped by traffic guard",
-                status.message,
-                account_label=status.account_label,
-                used_bytes=status.used_bytes,
-                limit_bytes=status.limit_bytes,
-            )
+            if config.login.auto_switch.enabled and _is_traffic_limit_reached(status.used_bytes, status.limit_bytes):
+                _prepare_auto_switch_after_limit(
+                    portal,
+                    accounts,
+                    notifier,
+                    config,
+                    dry_run,
+                    status.message,
+                )
+                force_account_rotation = True
+            else:
+                return _stop_for_limit(
+                    portal,
+                    accounts,
+                    notifier,
+                    dry_run,
+                    "AutoTiangong stopped by traffic guard",
+                    status.message,
+                    account_label=status.account_label,
+                    used_bytes=status.used_bytes,
+                    limit_bytes=status.limit_bytes,
+                )
 
-    if not force_login and portal.is_online():
-        logging.info("Network is online; login not needed.")
-        return 0
+    if not force_login and not force_account_rotation:
+        if portal.is_online():
+            session_status = portal.session_status()
+            if not session_status.checked:
+                logging.info("Network is online; %s Login not needed.", session_status.message)
+                return 0
+            if session_status.authenticated:
+                _sync_active_account_from_session(accounts, config, dry_run, session_status.username)
+                logging.info("Network is online; %s Login not needed.", session_status.message)
+                return 0
+            logging.info("Network is online, but %s", session_status.message)
+        else:
+            session_status = portal.session_status()
+            if session_status.checked and session_status.authenticated:
+                _sync_active_account_from_session(accounts, config, dry_run, session_status.username)
+                logging.info(
+                    "Connectivity check did not confirm an online network, but %s Login not needed.",
+                    session_status.message,
+                )
+                return 0
+            if session_status.checked:
+                logging.info("Connectivity check did not confirm an online network, and %s", session_status.message)
 
-    if force_login:
+    if force_account_rotation:
+        logging.info("Traffic guard limit reached; attempting login with the next available authorized account.")
+    elif force_login:
         logging.info("Force login requested; attempting login even though connectivity may already be online.")
     else:
         logging.info("Connectivity check indicates captive/offline network; attempting login.")
+    return _attempt_login_candidates(portal, config, dry_run, traffic_guard, accounts, notifier)
+
+
+def _attempt_login_candidates(
+    portal: CampusPortal,
+    config: AppConfig,
+    dry_run: bool,
+    traffic_guard: TrafficGuard | None,
+    accounts: AccountRegistry,
+    notifier: Notifier,
+) -> int:
     try:
         candidates = _login_candidates(accounts, config.login.auto_switch)
     except RuntimeError as exc:
@@ -149,6 +193,40 @@ def _run_once(
     return 1
 
 
+def _is_traffic_limit_reached(used_bytes: int | None, limit_bytes: int | None) -> bool:
+    return used_bytes is not None and limit_bytes is not None and used_bytes >= limit_bytes
+
+
+def _prepare_auto_switch_after_limit(
+    portal: CampusPortal,
+    accounts: AccountRegistry,
+    notifier: Notifier,
+    config: AppConfig,
+    dry_run: bool,
+    message: str,
+) -> None:
+    account_id = accounts.current_account_id()
+    try:
+        credentials = accounts.credentials(dry_run=dry_run)
+    except RuntimeError as exc:
+        logging.error("Could not load active account credentials for automatic rotation: %s", exc)
+        credentials = None
+
+    _logout_if_enabled(portal, credentials, dry_run)
+    if not dry_run:
+        accounts.mark_unavailable(
+            account_id,
+            message,
+            reset_days=config.login.auto_switch.unavailable_reset_days,
+        )
+    logging.warning(
+        "Account id %s marked unavailable after traffic guard limit%s.",
+        account_id,
+        " for this rotation window" if config.login.auto_switch.unavailable_reset_days else "",
+    )
+    _notify_account_unavailable_by_id(notifier, account_id, message)
+
+
 def _login_candidates(accounts: AccountRegistry, auto_switch: AutoSwitchConfig) -> list[AccountConfig]:
     if auto_switch.enabled:
         candidates = accounts.login_candidates(auto_switch.strategy)
@@ -172,6 +250,31 @@ def _should_persist_auto_switch(
     )
 
 
+def _sync_active_account_from_session(
+    accounts: AccountRegistry,
+    config: AppConfig,
+    dry_run: bool,
+    session_username: str | None,
+) -> None:
+    if not config.login.auto_switch.enabled or not config.login.auto_switch.persist_success or dry_run or not session_username:
+        return
+    account_id = _account_id_for_session_username(accounts, session_username)
+    if account_id is None or account_id == accounts.current_account_id():
+        return
+    accounts.switch_to(account_id)
+    logging.info("Active account state aligned with Dr.COM session uid %s as account id %s.", session_username, account_id)
+
+
+def _account_id_for_session_username(accounts: AccountRegistry, session_username: str) -> str | None:
+    for account in accounts.list_accounts():
+        if account.id == session_username:
+            return account.id
+    for account in accounts.list_accounts():
+        if os.environ.get(account.username_env) == session_username:
+            return account.id
+    return None
+
+
 def _stop_for_limit(
     portal: CampusPortal,
     accounts: AccountRegistry,
@@ -191,10 +294,7 @@ def _stop_for_limit(
             logging.error("Could not load active account credentials for logout: %s", exc)
 
     account_id = credentials.id if credentials else accounts.current_account_id()
-    if credentials is not None and portal.config.logout.enabled:
-        logout_result = portal.logout(credentials.username, dry_run=dry_run)
-        log_fn = logging.info if logout_result.ok else logging.error
-        log_fn("%s (status=%s url=%s)", logout_result.message, logout_result.status, logout_result.url)
+    _logout_if_enabled(portal, credentials, dry_run)
 
     event = NotificationEvent(
         title=title,
@@ -210,11 +310,23 @@ def _stop_for_limit(
     return TRAFFIC_LIMIT_EXIT_CODE
 
 
+def _logout_if_enabled(portal: CampusPortal, credentials: AccountCredentials | None, dry_run: bool) -> None:
+    if credentials is None or not portal.config.logout.enabled:
+        return
+    logout_result = portal.logout(credentials.username, dry_run=dry_run)
+    log_fn = logging.info if logout_result.ok else logging.error
+    log_fn("%s (status=%s url=%s)", logout_result.message, logout_result.status, logout_result.url)
+
+
 def _notify_account_unavailable(notifier: Notifier, credentials: AccountCredentials, message: str) -> None:
+    _notify_account_unavailable_by_id(notifier, credentials.id, message)
+
+
+def _notify_account_unavailable_by_id(notifier: Notifier, account_id: str, message: str) -> None:
     event = NotificationEvent(
         title="AutoTiangong marked account unavailable",
         message=message,
-        account_id=credentials.id,
+        account_id=account_id,
     )
     for result in notifier.send(event):
         log_fn = logging.info if result.ok else logging.error

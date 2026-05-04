@@ -8,7 +8,8 @@ from unittest.mock import patch
 from autotiangong.accounts import AccountRegistry
 from autotiangong.config import AccountConfig, AppConfig, AutoSwitchConfig, LoginConfig
 from autotiangong.daemon import TRAFFIC_LIMIT_EXIT_CODE, _run_once
-from autotiangong.portal import LoginResult
+from autotiangong.portal import LoginResult, PortalSessionStatus
+from autotiangong.traffic import TrafficStatus
 
 
 class FakePortal:
@@ -17,6 +18,7 @@ class FakePortal:
         self.results = list(results)
         self.login_usernames = []
         self.online = False
+        self.session = PortalSessionStatus(True, False, "Dr.COM portal did not report an active uid/session.")
 
     def is_online(self):
         return self.online
@@ -24,6 +26,9 @@ class FakePortal:
     def login(self, username, password, dry_run=False):
         self.login_usernames.append(username)
         return self.results.pop(0)
+
+    def session_status(self):
+        return self.session
 
 
 class FakeNotifier:
@@ -33,6 +38,21 @@ class FakeNotifier:
     def send(self, event):
         self.events.append(event)
         return []
+
+
+class FakeTrafficGuard:
+    enabled = True
+
+    def __init__(self, check_status):
+        self.check_status = check_status
+        self.activated_usernames = []
+
+    def check(self):
+        return self.check_status
+
+    def activate(self, username):
+        self.activated_usernames.append(username)
+        return TrafficStatus(True, "Traffic guard started for current account.")
 
 
 class DaemonAutoSwitchTest(unittest.TestCase):
@@ -142,6 +162,202 @@ class DaemonAutoSwitchTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(portal.login_usernames, ["alice"])
+
+    def test_online_network_with_inactive_portal_session_attempts_login(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            portal = FakePortal(
+                config,
+                [LoginResult(True, "Login response contained success marker: ok", 200, "http://portal/login")],
+            )
+            portal.online = True
+            portal.session = PortalSessionStatus(
+                True,
+                False,
+                "Dr.COM portal did not report an active uid/session.",
+            )
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one"}, clear=True):
+                exit_code = _run_once(portal, config, False, accounts=accounts, notifier=FakeNotifier())
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, ["alice"])
+
+    def test_online_network_with_active_portal_session_skips_login(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            portal = FakePortal(config, [])
+            portal.online = True
+            portal.session = PortalSessionStatus(True, True, "Dr.COM session is active for al***ce.")
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one"}, clear=True):
+                exit_code = _run_once(portal, config, False, accounts=accounts, notifier=FakeNotifier())
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, [])
+
+    def test_failed_connectivity_check_with_active_portal_session_skips_login(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            portal = FakePortal(config, [])
+            portal.online = False
+            portal.session = PortalSessionStatus(
+                True,
+                True,
+                "Dr.COM session is active for la***ry.",
+                username="lab-secondary",
+            )
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one"}, clear=True):
+                exit_code = _run_once(portal, config, False, accounts=accounts, notifier=FakeNotifier())
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, [])
+            self.assertEqual(accounts.current_account_id(), "lab-secondary")
+
+    def test_active_portal_session_aligns_active_account_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            portal = FakePortal(config, [])
+            portal.online = True
+            portal.session = PortalSessionStatus(
+                True,
+                True,
+                "Dr.COM session is active for la***ry.",
+                username="lab-secondary",
+            )
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one"}, clear=True):
+                exit_code = _run_once(portal, config, False, accounts=accounts, notifier=FakeNotifier())
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, [])
+            self.assertEqual(accounts.current_account_id(), "lab-secondary")
+
+    def test_active_portal_session_aligns_by_username_env_value(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            portal = FakePortal(config, [])
+            portal.online = True
+            portal.session = PortalSessionStatus(
+                True,
+                True,
+                "Dr.COM session is active for bo***ob.",
+                username="bob",
+            )
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one", "USER_2": "bob", "PASS_2": "two"}, clear=True):
+                exit_code = _run_once(portal, config, False, accounts=accounts, notifier=FakeNotifier())
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, [])
+            self.assertEqual(accounts.current_account_id(), "lab-secondary")
+
+    def test_traffic_guard_limit_auto_switches_to_next_account(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            notifier = FakeNotifier()
+            portal = FakePortal(
+                config,
+                [LoginResult(True, "Login response contained success marker: ok", 200, "http://portal/login")],
+            )
+            portal.online = True
+            guard = FakeTrafficGuard(
+                TrafficStatus(
+                    False,
+                    "Traffic guard limit reached (100 B / 100 B); stopping automatic login.",
+                    used_bytes=100,
+                    limit_bytes=100,
+                    account_label="al***ce",
+                )
+            )
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one", "USER_2": "bob", "PASS_2": "two"}):
+                exit_code = _run_once(
+                    portal,
+                    config,
+                    False,
+                    traffic_guard=guard,
+                    accounts=accounts,
+                    notifier=notifier,
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, ["bob"])
+            self.assertEqual(guard.activated_usernames, ["bob"])
+            self.assertTrue(accounts.is_unavailable("lab-primary"))
+            self.assertEqual(accounts.current_account_id(), "lab-secondary")
+            self.assertEqual(notifier.events[0].account_id, "lab-primary")
+
+    def test_traffic_guard_counter_error_still_stops_without_rotation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            portal = FakePortal(config, [])
+            guard = FakeTrafficGuard(
+                TrafficStatus(False, "Traffic guard could not read network counters; stopping automatic login.")
+            )
+
+            with patch.dict(os.environ, {"USER_1": "alice", "PASS_1": "one"}, clear=True):
+                exit_code = _run_once(
+                    portal,
+                    config,
+                    False,
+                    traffic_guard=guard,
+                    accounts=accounts,
+                    notifier=FakeNotifier(),
+                )
+
+            self.assertEqual(exit_code, TRAFFIC_LIMIT_EXIT_CODE)
+            self.assertEqual(portal.login_usernames, [])
+
+    def test_traffic_guard_limit_rotates_even_if_active_secret_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "active.json"
+            config = _config(state_path, auto_switch=AutoSwitchConfig(enabled=True))
+            accounts = AccountRegistry(config.login)
+            notifier = FakeNotifier()
+            portal = FakePortal(
+                config,
+                [LoginResult(True, "Login response contained success marker: ok", 200, "http://portal/login")],
+            )
+            guard = FakeTrafficGuard(
+                TrafficStatus(
+                    False,
+                    "Traffic guard limit reached (100 B / 100 B); stopping automatic login.",
+                    used_bytes=100,
+                    limit_bytes=100,
+                )
+            )
+
+            with patch.dict(os.environ, {"USER_2": "bob", "PASS_2": "two"}, clear=True):
+                exit_code = _run_once(
+                    portal,
+                    config,
+                    False,
+                    traffic_guard=guard,
+                    accounts=accounts,
+                    notifier=notifier,
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(portal.login_usernames, ["bob"])
+            self.assertTrue(accounts.is_unavailable("lab-primary"))
+            self.assertEqual(accounts.current_account_id(), "lab-secondary")
+            self.assertEqual(notifier.events[0].account_id, "lab-primary")
 
 
 def _config(state_path, auto_switch):

@@ -262,7 +262,7 @@ def _sync_active_account_from_session(
     if account_id is None or account_id == accounts.current_account_id():
         return
     accounts.switch_to(account_id)
-    logging.info("Active account state aligned with Dr.COM session uid %s as account id %s.", session_username, account_id)
+    logging.info("Active account state aligned with Dr.COM session as account id %s.", account_id)
 
 
 def _account_id_for_session_username(accounts: AccountRegistry, session_username: str) -> str | None:

@@ -2,7 +2,7 @@
 
 Authorized campus portal guard for a lab gateway or a personal machine.
 
-AutoTiangong can register multiple authorized accounts and optionally fail over when the portal/login response indicates the current account is unavailable, authentication failed, or the session is abnormal. Switching is driven by explicit portal/status signals, not by host traffic counters or a fixed local 4.9 GiB threshold.
+AutoTiangong can register multiple authorized accounts and optionally fail over when the portal/login response indicates the current account is unavailable, authentication failed, or the session is abnormal. Switching is driven by explicit portal/status signals, and the optional local traffic guard can rotate accounts only when auto-switch is enabled; there is no implicit fixed 4.9 GiB threshold.
 
 ## What it does
 

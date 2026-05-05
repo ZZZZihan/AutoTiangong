@@ -108,6 +108,7 @@ Important fields:
 - `login.accounts`: authorized lab account IDs and their username/password environment variable names.
 - `login.active_account_id`: default account ID when no manual switch state exists.
 - `login.active_account_state_path`: local state file used by the manual switch command.
+- `login.account_event_log_path`: local JSON Lines audit log for login attempts, successful logins, active-account switches, unavailable markers, and restores.
 - `login.kernel_port`: optional Dr.COM kernel port used when the rendered portal login falls back to `/drcom/login`; `null` means reuse `portal_url` host/port.
 - `login.fallback_to_kernel`: when true, tries the kernel login endpoint if the rendered ePortal response is inconclusive.
 - `login.auto_switch.enabled`: when true, tries each registered account once after login failure or account-unavailable markers.
@@ -126,7 +127,7 @@ Important fields:
 - `traffic_guard.interface`: optional network interface/adapter name. On Windows this is matched against the adapter name reported by `Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface`.
 - `traffic_guard.fail_closed`: when true, a counter read failure stops automatic login.
 
-The traffic guard reads host-level adapter counters, so traffic from other processes on the same machine can count toward the guardrail. It records only a masked account label, a username hash, byte counters, and timestamps in `traffic_guard.state_path`. The manual switch command records only the active account ID and timestamp in `login.active_account_state_path`. Neither state file stores passwords.
+The traffic guard reads host-level adapter counters, so traffic from other processes on the same machine can count toward the guardrail. It records only a masked account label, a username hash, byte counters, and timestamps in `traffic_guard.state_path`. The manual switch command records only the active account ID and timestamp in `login.active_account_state_path`. Account history is appended to `login.account_event_log_path` as JSON Lines and stores account IDs, event names, reasons, and status codes, not passwords or password environment variable values.
 
 Register multiple lab-authorized accounts in `config.local.json`:
 
@@ -135,6 +136,7 @@ Register multiple lab-authorized accounts in `config.local.json`:
   "login": {
     "active_account_id": "lab-primary",
     "active_account_state_path": ".autotiangong-active-account.json",
+    "account_event_log_path": ".autotiangong-account-events.jsonl",
     "kernel_port": null,
     "fallback_to_kernel": true,
     "auto_switch": {
@@ -208,6 +210,13 @@ Inspect or clear unavailable markers:
 python -m autotiangong.switch_account --config config.local.json --unavailable
 python -m autotiangong.switch_account --config config.local.json --restore lab-primary
 python -m autotiangong.switch_account --config config.local.json --restore-all
+```
+
+Inspect recent account history or count today's actual switches:
+
+```bash
+python -m autotiangong.switch_account --config config.local.json --history
+python -m autotiangong.switch_account --config config.local.json --history --today --history-limit 0
 ```
 
 Enable notifications with webhook environment variables:

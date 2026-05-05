@@ -9,12 +9,15 @@ SSID becomes `360WiFi-E07A5C`.
 
 The LaunchAgent checks the active Wi-Fi SSID every 10 seconds. While you remain
 on the target network, the runner starts one lightweight AutoTiangong check each
-interval. If Dr.COM drops the current account after a quota/session limit, that
-next check verifies the Dr.COM portal `uid`/session state before deciding to
-skip login. If no active portal session is reported, `--auto-switch` can
-immediately try the next configured account. Consecutive failed checks are
-capped by `--max-retries` for the same connection, then probed again after the
-retry cooldown.
+interval. Repeated successful "already online" checks are summarized every
+`--success-log-interval` seconds instead of writing three lines every poll; any
+forced login, login attempt, account switch, unavailable marker, traffic guard
+event, or failure is still logged immediately. If Dr.COM drops the current
+account after a quota/session limit, that next check verifies the Dr.COM portal
+`uid`/session state before deciding to skip login. If no active portal session
+is reported, `--auto-switch` can immediately try the next configured account.
+Consecutive failed checks are capped by `--max-retries` for the same connection,
+then probed again after the retry cooldown.
 
 The triggered command is:
 
@@ -53,6 +56,7 @@ Useful files:
 - LaunchAgent stdout/stderr: `logs/macos-wifi-launchd.out.log` and
   `logs/macos-wifi-launchd.err.log`
 - Trigger state: `.autotiangong-macos-wifi-trigger/`
+- Account event log: `.autotiangong-account-events.jsonl`
 
 Useful tuning options:
 
@@ -60,7 +64,14 @@ Useful tuning options:
 ./scripts/install_macos_wifi_launch_agent.sh \
   --interval-seconds 10 \
   --max-retries 6 \
-  --retry-cooldown 300
+  --retry-cooldown 300 \
+  --success-log-interval 300
+```
+
+To count actual account switches for the local day:
+
+```bash
+python -m autotiangong.switch_account --config config.local.json --history --today --history-limit 0
 ```
 
 Uninstall:

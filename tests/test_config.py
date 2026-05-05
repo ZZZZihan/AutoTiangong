@@ -15,6 +15,7 @@ class ConfigTest(unittest.TestCase):
             "login": {
                 "active_account_id": "lab-primary",
                 "active_account_state_path": "state/active.json",
+                "account_event_log_path": "state/account-events.jsonl",
                 "kernel_port": 9002,
                 "fallback_to_kernel": True,
                 "auto_switch": {
@@ -82,6 +83,7 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(config.traffic_guard.fail_closed)
         self.assertEqual(config.login.active_account_id, "lab-primary")
         self.assertEqual(config.login.active_account_state_path, "state/active.json")
+        self.assertEqual(config.login.account_event_log_path, "state/account-events.jsonl")
         self.assertEqual(config.login.kernel_port, 9002)
         self.assertTrue(config.login.fallback_to_kernel)
         self.assertTrue(config.login.auto_switch.enabled)

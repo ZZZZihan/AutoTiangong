@@ -14,6 +14,7 @@ STATE_DIR=".autotiangong-macos-wifi-trigger"
 INTERVAL_SECONDS=10
 MAX_RETRIES=6
 RETRY_COOLDOWN_SECONDS=300
+SUCCESS_LOG_INTERVAL_SECONDS=300
 INSTALL_DEPS=0
 FORCE_LOGIN=0
 START_NOW=0
@@ -39,6 +40,7 @@ Options:
   --interval-seconds N     Poll interval. Defaults to 10.
   --max-retries N          Retry failed runs while still on target SSID. Defaults to 6.
   --retry-cooldown N       Seconds to wait before probing again after retry cap. Defaults to 300.
+  --success-log-interval N Seconds between repeated successful check log entries. Defaults to 300.
   --install-deps           Create .venv if needed and pip install -e the project.
   --force-login            Force login on new target connections and failed retries.
   --start-now              Start the LaunchAgent immediately after installation.
@@ -99,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             RETRY_COOLDOWN_SECONDS="$2"
             shift 2
             ;;
+        --success-log-interval)
+            SUCCESS_LOG_INTERVAL_SECONDS="$2"
+            shift 2
+            ;;
         --install-deps)
             INSTALL_DEPS=1
             shift
@@ -153,6 +159,7 @@ require_number() {
 require_number "--interval-seconds" "$INTERVAL_SECONDS"
 require_number "--max-retries" "$MAX_RETRIES"
 require_number "--retry-cooldown" "$RETRY_COOLDOWN_SECONDS"
+require_number "--success-log-interval" "$SUCCESS_LOG_INTERVAL_SECONDS"
 
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 RUNNER="$PROJECT_DIR/scripts/run_macos_wifi_trigger.sh"
@@ -209,6 +216,7 @@ program_args=(
     --state-dir "$STATE_DIR_ABS"
     --max-retries "$MAX_RETRIES"
     --retry-cooldown "$RETRY_COOLDOWN_SECONDS"
+    --success-log-interval "$SUCCESS_LOG_INTERVAL_SECONDS"
 )
 if [[ -n "$TARGET_ROUTER_IP" ]]; then
     program_args+=(--router-ip "$TARGET_ROUTER_IP")

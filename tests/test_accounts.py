@@ -17,6 +17,7 @@ class AccountRegistryTest(unittest.TestCase):
             registry = AccountRegistry(
                 LoginConfig(
                     active_account_state_path=str(state_path),
+                    account_event_log_path=str(Path(tmpdir) / "events.jsonl"),
                     accounts=[
                         AccountConfig("lab-primary", "USER_1", "PASS_1"),
                         AccountConfig("lab-secondary", "USER_2", "PASS_2"),
@@ -32,6 +33,11 @@ class AccountRegistryTest(unittest.TestCase):
             self.assertIn("lab-secondary", raw_state)
             self.assertNotIn("USER_2", raw_state)
             self.assertNotIn("PASS_2", raw_state)
+            raw_events = (Path(tmpdir) / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("active_account_switched", raw_events)
+            self.assertIn("lab-secondary", raw_events)
+            self.assertNotIn("USER_2", raw_events)
+            self.assertNotIn("PASS_2", raw_events)
 
     def test_credentials_use_selected_account_environment_variables(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -39,6 +45,7 @@ class AccountRegistryTest(unittest.TestCase):
             registry = AccountRegistry(
                 LoginConfig(
                     active_account_state_path=str(state_path),
+                    account_event_log_path=str(Path(tmpdir) / "events.jsonl"),
                     accounts=[
                         AccountConfig("lab-primary", "USER_1", "PASS_1"),
                         AccountConfig("lab-secondary", "USER_2", "PASS_2"),
@@ -60,6 +67,7 @@ class AccountRegistryTest(unittest.TestCase):
             registry = AccountRegistry(
                 LoginConfig(
                     active_account_state_path=str(state_path),
+                    account_event_log_path=str(Path(tmpdir) / "events.jsonl"),
                     accounts=[
                         AccountConfig("lab-primary", "USER_1", "PASS_1"),
                         AccountConfig("lab-secondary", "USER_2", "PASS_2"),
@@ -80,6 +88,7 @@ class AccountRegistryTest(unittest.TestCase):
             registry = AccountRegistry(
                 LoginConfig(
                     active_account_state_path=str(state_path),
+                    account_event_log_path=str(Path(tmpdir) / "events.jsonl"),
                     auto_switch=AutoSwitchConfig(unavailable_state_path=str(unavailable_path)),
                     accounts=[
                         AccountConfig("lab-primary", "USER_1", "PASS_1"),
@@ -120,6 +129,7 @@ class AccountRegistryTest(unittest.TestCase):
             registry = AccountRegistry(
                 LoginConfig(
                     active_account_state_path=str(Path(tmpdir) / "active.json"),
+                    account_event_log_path=str(Path(tmpdir) / "events.jsonl"),
                     auto_switch=AutoSwitchConfig(unavailable_state_path=str(unavailable_path)),
                     accounts=[
                         AccountConfig("lab-primary", "USER_1", "PASS_1"),
@@ -130,6 +140,46 @@ class AccountRegistryTest(unittest.TestCase):
 
             self.assertFalse(registry.is_unavailable("lab-primary"))
             self.assertEqual(registry.unavailable_accounts(), {})
+
+    def test_account_events_since_compares_offset_timestamps_by_instant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_log_path = Path(tmpdir) / "events.jsonl"
+            event_log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-05-04T15:30:00+00:00",
+                                "event": "active_account_switched",
+                                "account_id": "lab-primary",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-05-04T16:30:00+00:00",
+                                "event": "active_account_switched",
+                                "account_id": "lab-secondary",
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            registry = AccountRegistry(
+                LoginConfig(
+                    active_account_state_path=str(Path(tmpdir) / "active.json"),
+                    account_event_log_path=str(event_log_path),
+                    accounts=[
+                        AccountConfig("lab-primary", "USER_1", "PASS_1"),
+                        AccountConfig("lab-secondary", "USER_2", "PASS_2"),
+                    ],
+                )
+            )
+
+            events = registry.account_events(since="2026-05-05T00:00:00+08:00")
+
+            self.assertEqual([event["account_id"] for event in events], ["lab-secondary"])
 
 
 if __name__ == "__main__":

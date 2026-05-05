@@ -13,6 +13,7 @@ login:
   password_env: CAMPUS_NET_PASSWORD
   active_account_id: lab-primary
   active_account_state_path: .autotiangong-active-account.json
+  account_event_log_path: .autotiangong-account-events.jsonl
   auto_switch:
     enabled: false
     persist_success: true

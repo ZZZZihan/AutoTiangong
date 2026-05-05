@@ -12,6 +12,7 @@ LOG_DIR="logs"
 STATE_DIR=".autotiangong-macos-wifi-trigger"
 MAX_RETRIES=6
 RETRY_COOLDOWN_SECONDS=300
+SUCCESS_LOG_INTERVAL_SECONDS=300
 FORCE_LOGIN=0
 
 usage() {
@@ -30,6 +31,8 @@ Options:
   --state-dir PATH        State directory, relative to project dir unless absolute.
   --max-retries N         Retry failed runs while still on target SSID. Defaults to 6.
   --retry-cooldown N      Seconds to wait before probing again after retry cap. Defaults to 300.
+  --success-log-interval N
+                          Seconds between repeated successful check log entries. Defaults to 300.
   --force-login           Pass --force-login on a new target connection and failed retries.
 USAGE
 }
@@ -78,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --retry-cooldown)
             RETRY_COOLDOWN_SECONDS="$2"
+            shift 2
+            ;;
+        --success-log-interval)
+            SUCCESS_LOG_INTERVAL_SECONDS="$2"
             shift 2
             ;;
         --force-login)
@@ -213,6 +220,9 @@ LOCK_DIR="$STATE_DIR_ABS/lock"
 LAST_SSID_FILE="$STATE_DIR_ABS/last_ssid"
 RETRY_FILE="$STATE_DIR_ABS/retry_count"
 LAST_FAILURE_FILE="$STATE_DIR_ABS/last_failure_epoch"
+LAST_SUCCESS_LOG_FILE="$STATE_DIR_ABS/last_success_log_epoch"
+SUPPRESSED_SUCCESS_FILE="$STATE_DIR_ABS/suppressed_success_count"
+RUN_OUTPUT=""
 
 mkdir -p "$LOG_DIR_ABS" "$STATE_DIR_ABS"
 
@@ -220,7 +230,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     log_line "Another Wi-Fi trigger run is still active; skipping."
     exit 0
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+trap 'if [[ -n "${RUN_OUTPUT:-}" ]]; then rm -f "$RUN_OUTPUT"; fi; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 if [[ ! "$MAX_RETRIES" =~ ^[0-9]+$ || "$MAX_RETRIES" -eq 0 ]]; then
     log_line "Invalid --max-retries value: $MAX_RETRIES"
@@ -228,6 +238,10 @@ if [[ ! "$MAX_RETRIES" =~ ^[0-9]+$ || "$MAX_RETRIES" -eq 0 ]]; then
 fi
 if [[ ! "$RETRY_COOLDOWN_SECONDS" =~ ^[0-9]+$ || "$RETRY_COOLDOWN_SECONDS" -eq 0 ]]; then
     log_line "Invalid --retry-cooldown value: $RETRY_COOLDOWN_SECONDS"
+    exit 64
+fi
+if [[ ! "$SUCCESS_LOG_INTERVAL_SECONDS" =~ ^[0-9]+$ || "$SUCCESS_LOG_INTERVAL_SECONDS" -eq 0 ]]; then
+    log_line "Invalid --success-log-interval value: $SUCCESS_LOG_INTERVAL_SECONDS"
     exit 64
 fi
 
@@ -256,6 +270,7 @@ if ! matches_target_network "$identity"; then
     printf '%s\n' "$identity" > "$LAST_SSID_FILE"
     printf '0\n' > "$RETRY_FILE"
     rm -f "$LAST_FAILURE_FILE"
+    rm -f "$LAST_SUCCESS_LOG_FILE" "$SUPPRESSED_SUCCESS_FILE"
     log_line "Current Wi-Fi identity is '${identity:-<none>}'; waiting for '$TARGET_SSID'."
     exit 0
 fi
@@ -293,12 +308,12 @@ if [[ "$FORCE_LOGIN" -eq 1 && ( "$first_target_run" -eq 1 || "$retry_count" -gt 
     args+=(--force-login)
 fi
 
-log_line "Matched '$TARGET_SSID' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS."
+RUN_OUTPUT="$(mktemp "$STATE_DIR_ABS/run-output.XXXXXX")"
 set +e
 (
     cd "$PROJECT_DIR"
     PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_ABS" "${args[@]}"
-) >> "$LOG_FILE" 2>&1
+) > "$RUN_OUTPUT" 2>&1
 exit_code=$?
 set -e
 
@@ -306,12 +321,49 @@ printf '%s\n' "$identity" > "$LAST_SSID_FILE"
 if [[ "$exit_code" -eq 0 ]]; then
     printf '0\n' > "$RETRY_FILE"
     rm -f "$LAST_FAILURE_FILE"
-    log_line "AutoTiangong completed successfully."
+    significant_output=0
+    if grep -Eq "Force login requested|Connectivity check indicates captive|attempting login|Using authorized account id|Prepared Dr\\.COM login request|Kernel login|Active account switched|Active account state aligned|marked unavailable|Login failed|Traffic guard limit reached|Traffic guard could not|Traffic guard started|account unavailable|AutoTiangong stopped" "$RUN_OUTPUT"; then
+        significant_output=1
+    fi
+
+    now_epoch="$(date +%s)"
+    last_success_log_epoch="$(cat "$LAST_SUCCESS_LOG_FILE" 2>/dev/null || printf '0')"
+    if [[ ! "$last_success_log_epoch" =~ ^[0-9]+$ ]]; then
+        last_success_log_epoch=0
+    fi
+    suppressed_success_count="$(cat "$SUPPRESSED_SUCCESS_FILE" 2>/dev/null || printf '0')"
+    if [[ ! "$suppressed_success_count" =~ ^[0-9]+$ ]]; then
+        suppressed_success_count=0
+    fi
+
+    should_log_success=0
+    if [[ "$first_target_run" -eq 1 || "$significant_output" -eq 1 ]]; then
+        should_log_success=1
+    elif (( now_epoch - last_success_log_epoch >= SUCCESS_LOG_INTERVAL_SECONDS )); then
+        should_log_success=1
+    fi
+
+    if [[ "$should_log_success" -eq 1 ]]; then
+        suppressed_note=""
+        if [[ "$suppressed_success_count" -gt 0 ]]; then
+            suppressed_note=" Suppressed $suppressed_success_count repeated successful check(s) since last logged success."
+        fi
+        log_line "Matched '$TARGET_SSID' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS.$suppressed_note"
+        cat "$RUN_OUTPUT" >> "$LOG_FILE"
+        log_line "AutoTiangong completed successfully."
+        printf '%s\n' "$now_epoch" > "$LAST_SUCCESS_LOG_FILE"
+        printf '0\n' > "$SUPPRESSED_SUCCESS_FILE"
+    else
+        suppressed_success_count=$((suppressed_success_count + 1))
+        printf '%s\n' "$suppressed_success_count" > "$SUPPRESSED_SUCCESS_FILE"
+    fi
     exit 0
 fi
 
 retry_count=$((retry_count + 1))
 printf '%s\n' "$retry_count" > "$RETRY_FILE"
 date +%s > "$LAST_FAILURE_FILE"
+log_line "Matched '$TARGET_SSID' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS."
+cat "$RUN_OUTPUT" >> "$LOG_FILE"
 log_line "AutoTiangong exited with code $exit_code; retry $retry_count/$MAX_RETRIES."
 exit "$exit_code"

@@ -67,6 +67,7 @@ class LoginConfig:
     password_env: str = "CAMPUS_NET_PASSWORD"
     active_account_id: str | None = None
     active_account_state_path: str = ".autotiangong-active-account.json"
+    account_event_log_path: str = ".autotiangong-account-events.jsonl"
     accounts: list[AccountConfig] = field(default_factory=list)
     extra_fields: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_EXTRA_FIELDS))
     success_markers: list[str] = field(default_factory=lambda: ["Dr.COMWebLoginID_3.htm", '"result":1'])
@@ -149,6 +150,7 @@ def load_config(path: str | Path) -> AppConfig:
         password_env=str(login_raw.get("password_env", "CAMPUS_NET_PASSWORD")),
         active_account_id=_optional_string(login_raw.get("active_account_id")),
         active_account_state_path=str(login_raw.get("active_account_state_path", ".autotiangong-active-account.json")),
+        account_event_log_path=str(login_raw.get("account_event_log_path", ".autotiangong-account-events.jsonl")),
         accounts=_load_accounts(login_raw),
         extra_fields=_string_dict(login_raw.get("extra_fields", DEFAULT_EXTRA_FIELDS)),
         success_markers=[str(item) for item in login_raw.get("success_markers", ["Dr.COMWebLoginID_3.htm", '"result":1'])],

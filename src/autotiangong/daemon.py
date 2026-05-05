@@ -136,17 +136,35 @@ def _attempt_login_candidates(
         except RuntimeError as exc:
             credentials_error_count += 1
             logging.error("%s", exc)
+            if not dry_run:
+                accounts.record_event(
+                    "login_credentials_missing",
+                    account_id=account.id,
+                    source="daemon",
+                    error=str(exc),
+                )
             if not config.login.auto_switch.enabled:
                 return 2
             continue
 
         logging.info("Using authorized account id: %s", credentials.id)
+        if not dry_run:
+            accounts.record_event("login_attempt", account_id=credentials.id, source="daemon")
         result = portal.login(credentials.username, credentials.password, dry_run=dry_run)
         log_fn = logging.info if result.ok else logging.error
         log_fn("%s (reason=%s status=%s url=%s)", result.message, result.reason, result.status, result.url)
+        if not dry_run:
+            accounts.record_event(
+                "login_result",
+                account_id=credentials.id,
+                ok=result.ok,
+                reason=result.reason,
+                status=result.status,
+                source="daemon",
+            )
         if result.ok:
             if _should_persist_auto_switch(accounts, credentials, config, dry_run):
-                accounts.switch_to(credentials.id)
+                accounts.switch_to(credentials.id, source="auto_switch", reason="login_success")
                 logging.info("Active account switched to %s after successful automatic login.", credentials.id)
             if traffic_guard and traffic_guard.enabled and not dry_run:
                 status = traffic_guard.activate(credentials.username)
@@ -174,6 +192,7 @@ def _attempt_login_candidates(
                     credentials.id,
                     result.message,
                     reset_days=config.login.auto_switch.unavailable_reset_days,
+                    source="login_result",
                 )
             logging.warning(
                 "Account id %s marked unavailable%s.",
@@ -218,6 +237,7 @@ def _prepare_auto_switch_after_limit(
             account_id,
             message,
             reset_days=config.login.auto_switch.unavailable_reset_days,
+            source="traffic_guard",
         )
     logging.warning(
         "Account id %s marked unavailable after traffic guard limit%s.",
@@ -261,7 +281,7 @@ def _sync_active_account_from_session(
     account_id = _account_id_for_session_username(accounts, session_username)
     if account_id is None or account_id == accounts.current_account_id():
         return
-    accounts.switch_to(account_id)
+    accounts.switch_to(account_id, source="portal_session", reason="session_alignment")
     logging.info("Active account state aligned with Dr.COM session as account id %s.", account_id)
 
 

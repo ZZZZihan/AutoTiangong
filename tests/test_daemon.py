@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -75,6 +76,10 @@ class DaemonAutoSwitchTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(portal.login_usernames, ["alice", "bob"])
             self.assertEqual(accounts.current_account_id(), "lab-secondary")
+            events = _read_events(Path(tmpdir) / "events.jsonl")
+            self.assertEqual([event["event"] for event in events], ["login_attempt", "login_result", "login_attempt", "login_result", "active_account_switched"])
+            self.assertEqual(events[-1]["source"], "auto_switch")
+            self.assertTrue(events[-1]["changed"])
 
     def test_auto_switch_skips_accounts_with_missing_secrets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -367,6 +372,7 @@ def _config(state_path, auto_switch):
         login=LoginConfig(
             active_account_id="lab-primary",
             active_account_state_path=str(state_path),
+            account_event_log_path=str(Path(state_path).with_name("events.jsonl")),
             accounts=[
                 AccountConfig("lab-primary", "USER_1", "PASS_1"),
                 AccountConfig("lab-secondary", "USER_2", "PASS_2"),
@@ -374,6 +380,10 @@ def _config(state_path, auto_switch):
             auto_switch=auto_switch,
         ),
     )
+
+
+def _read_events(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 if __name__ == "__main__":

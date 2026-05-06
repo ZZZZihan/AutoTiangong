@@ -5,8 +5,16 @@
 config.local.json
 config.*.json
 !config.example.json
+config.local.yaml
+config.*.yaml
+!config.example.yaml
 .autotiangong-active-account.json
+.autotiangong-account-events.jsonl
+.autotiangong-daemon.pid
+.autotiangong-macos-wifi-trigger/
+.autotiangong-unavailable-accounts.json
 .autotiangong-traffic.json
+state/
 .omx/
 .venv/
 __pycache__/

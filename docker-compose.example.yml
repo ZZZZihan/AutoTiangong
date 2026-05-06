@@ -1,0 +1,18 @@
+services:
+  autotiangong:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./config.local.json:/config/config.local.json:ro
+      - ./.env:/config/.env:ro
+      - ./state:/state
+    environment:
+      TZ: Asia/Shanghai
+    command:
+      - python
+      - -m
+      - autotiangong
+      - --config
+      - /config/config.local.json
+      - --env-file
+      - /config/.env

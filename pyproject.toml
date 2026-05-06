@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Authorized campus portal guard with manual lab account selection."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["PyYAML>=6"]
 
 [project.scripts]
 autotiangong-net = "autotiangong.daemon:main"

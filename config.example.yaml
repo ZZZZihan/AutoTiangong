@@ -1,0 +1,97 @@
+portal_url: http://172.23.4.5/
+connectivity_url: http://connectivitycheck.gstatic.com/generate_204
+connectivity_expected_status: 204
+check_interval_seconds: 60
+request_timeout_seconds: 8
+
+login:
+  mode: drcom
+  method: GET
+  kernel_port: null
+  fallback_to_kernel: true
+  username_env: CAMPUS_NET_USERNAME
+  password_env: CAMPUS_NET_PASSWORD
+  active_account_id: lab-primary
+  active_account_state_path: .autotiangong-active-account.json
+  account_event_log_path: .autotiangong-account-events.jsonl
+  auto_switch:
+    enabled: false
+    persist_success: true
+    strategy: round_robin
+    unavailable_state_path: .autotiangong-unavailable-accounts.json
+    unavailable_reset_days: 1
+  accounts:
+    - id: lab-primary
+      username_env: CAMPUS_NET_USERNAME
+      password_env: CAMPUS_NET_PASSWORD
+    - id: lab-secondary
+      username_env: CAMPUS_NET_USERNAME_2
+      password_env: CAMPUS_NET_PASSWORD_2
+  extra_fields:
+    R1: "0"
+    R2: ""
+    R3: "0"
+    R6: "0"
+    para: "00"
+    0MKKey: "123456"
+  success_markers:
+    - Dr.COMWebLoginID_3.htm
+    - '"result":1'
+    - '"login_result":1'
+  failure_markers:
+    - Dr.COMWebLoginID_2.htm
+    - '"result":0'
+    - '"login_result":0'
+    - authfail
+  quota_limit_markers:
+    - 流量已达上限
+    - 流量达到上限
+    - 流量已用完
+    - 流量超限
+    - quota limit
+  account_unavailable_markers:
+    - 账号不可用
+    - 流量已用尽
+    - 已达上限
+    - 禁用
+    - password error
+    - authfail
+    - 会话异常
+
+logout:
+  enabled: false
+  method: GET
+  url: null
+  extra_fields: {}
+  success_markers: []
+  failure_markers: []
+
+notifications:
+  enabled: false
+  webhooks:
+    - name: wecom
+      kind: wecom
+      url_env: AUTOTIANGONG_WECOM_WEBHOOK
+    - name: dingtalk
+      kind: dingtalk
+      url_env: AUTOTIANGONG_DINGTALK_WEBHOOK
+    - name: telegram
+      kind: telegram
+      url_env: AUTOTIANGONG_TELEGRAM_WEBHOOK
+      chat_id_env: AUTOTIANGONG_TELEGRAM_CHAT_ID
+  email:
+    enabled: false
+    smtp_host_env: AUTOTIANGONG_SMTP_HOST
+    smtp_port: 587
+    username_env: AUTOTIANGONG_SMTP_USERNAME
+    password_env: AUTOTIANGONG_SMTP_PASSWORD
+    from_env: AUTOTIANGONG_EMAIL_FROM
+    to_env: AUTOTIANGONG_EMAIL_TO
+    use_tls: true
+
+traffic_guard:
+  enabled: false
+  limit_gib: 4.9
+  state_path: .autotiangong-traffic.json
+  interface: null
+  fail_closed: true

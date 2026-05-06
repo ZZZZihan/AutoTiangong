@@ -7,10 +7,20 @@
   "login": {
     "mode": "drcom",
     "method": "GET",
+    "kernel_port": null,
+    "fallback_to_kernel": true,
     "username_env": "CAMPUS_NET_USERNAME",
     "password_env": "CAMPUS_NET_PASSWORD",
     "active_account_id": "lab-primary",
     "active_account_state_path": ".autotiangong-active-account.json",
+    "account_event_log_path": ".autotiangong-account-events.jsonl",
+    "auto_switch": {
+      "enabled": false,
+      "persist_success": true,
+      "strategy": "round_robin",
+      "unavailable_state_path": ".autotiangong-unavailable-accounts.json",
+      "unavailable_reset_days": 1
+    },
     "accounts": [
       {
         "id": "lab-primary",
@@ -48,6 +58,15 @@
       "流量已用完",
       "流量超限",
       "quota limit"
+    ],
+    "account_unavailable_markers": [
+      "账号不可用",
+      "流量已用尽",
+      "已达上限",
+      "禁用",
+      "password error",
+      "authfail",
+      "会话异常"
     ]
   },
   "logout": {

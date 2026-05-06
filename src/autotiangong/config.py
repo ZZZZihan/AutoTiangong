@@ -17,6 +17,30 @@ DEFAULT_EXTRA_FIELDS = {
 }
 
 
+DEFAULT_ACCOUNT_UNAVAILABLE_MARKERS = [
+    "账号不可用",
+    "账号已禁用",
+    "账户不可用",
+    "账户已禁用",
+    "流量已用尽",
+    "流量已用完",
+    "流量已达上限",
+    "流量达到上限",
+    "已达上限",
+    "已达到上限",
+    "禁用",
+    "认证失败",
+    "认证错误",
+    "密码错误",
+    "password error",
+    "authfail",
+    "authentication failed",
+    "session error",
+    "session expired",
+    "会话异常",
+]
+
+
 @dataclass(frozen=True)
 class AccountConfig:
     id: str
@@ -25,18 +49,32 @@ class AccountConfig:
 
 
 @dataclass(frozen=True)
+class AutoSwitchConfig:
+    enabled: bool = False
+    persist_success: bool = True
+    strategy: str = "round_robin"
+    unavailable_state_path: str = ".autotiangong-unavailable-accounts.json"
+    unavailable_reset_days: int = 1
+
+
+@dataclass(frozen=True)
 class LoginConfig:
     mode: str = "drcom"
     method: str = "GET"
+    kernel_port: int | None = None
+    fallback_to_kernel: bool = True
     username_env: str = "CAMPUS_NET_USERNAME"
     password_env: str = "CAMPUS_NET_PASSWORD"
     active_account_id: str | None = None
     active_account_state_path: str = ".autotiangong-active-account.json"
+    account_event_log_path: str = ".autotiangong-account-events.jsonl"
     accounts: list[AccountConfig] = field(default_factory=list)
     extra_fields: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_EXTRA_FIELDS))
     success_markers: list[str] = field(default_factory=lambda: ["Dr.COMWebLoginID_3.htm", '"result":1'])
     failure_markers: list[str] = field(default_factory=lambda: ["Dr.COMWebLoginID_2.htm", '"result":0'])
     quota_limit_markers: list[str] = field(default_factory=list)
+    account_unavailable_markers: list[str] = field(default_factory=list)
+    auto_switch: AutoSwitchConfig = field(default_factory=AutoSwitchConfig)
 
 
 @dataclass(frozen=True)
@@ -101,20 +139,27 @@ class AppConfig:
 
 
 def load_config(path: str | Path) -> AppConfig:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    raw = _read_config_mapping(path)
     login_raw = raw.get("login", {})
     login = LoginConfig(
         mode=str(login_raw.get("mode", "drcom")),
         method=str(login_raw.get("method", "GET")).upper(),
+        kernel_port=_optional_int(login_raw.get("kernel_port")),
+        fallback_to_kernel=bool(login_raw.get("fallback_to_kernel", True)),
         username_env=str(login_raw.get("username_env", "CAMPUS_NET_USERNAME")),
         password_env=str(login_raw.get("password_env", "CAMPUS_NET_PASSWORD")),
         active_account_id=_optional_string(login_raw.get("active_account_id")),
         active_account_state_path=str(login_raw.get("active_account_state_path", ".autotiangong-active-account.json")),
+        account_event_log_path=str(login_raw.get("account_event_log_path", ".autotiangong-account-events.jsonl")),
         accounts=_load_accounts(login_raw),
         extra_fields=_string_dict(login_raw.get("extra_fields", DEFAULT_EXTRA_FIELDS)),
         success_markers=[str(item) for item in login_raw.get("success_markers", ["Dr.COMWebLoginID_3.htm", '"result":1'])],
         failure_markers=[str(item) for item in login_raw.get("failure_markers", ["Dr.COMWebLoginID_2.htm", '"result":0'])],
         quota_limit_markers=[str(item) for item in login_raw.get("quota_limit_markers", [])],
+        account_unavailable_markers=[
+            str(item) for item in login_raw.get("account_unavailable_markers", DEFAULT_ACCOUNT_UNAVAILABLE_MARKERS)
+        ],
+        auto_switch=_load_auto_switch(login_raw.get("auto_switch", {})),
     )
     _validate_active_account(login)
     logout = _load_logout(raw.get("logout", {}))
@@ -149,6 +194,24 @@ def load_env_file(path: str | Path = ".env") -> None:
             os.environ[key] = value
 
 
+def _read_config_mapping(path: str | Path) -> dict[str, Any]:
+    config_path = Path(path)
+    text = config_path.read_text(encoding="utf-8")
+    suffix = config_path.suffix.lower()
+    if suffix in {".yaml", ".yml"}:
+        try:
+            import yaml
+        except ImportError as exc:  # pragma: no cover - exercised only when optional dependency is unavailable.
+            raise RuntimeError("YAML config files require PyYAML. Install autotiangong with its project dependencies.") from exc
+        raw = yaml.safe_load(text) or {}
+    else:
+        raw = json.loads(text)
+
+    if not isinstance(raw, dict):
+        raise TypeError("Configuration root must be an object")
+    return raw
+
+
 def require_secret(env_name: str) -> str:
     value = os.environ.get(env_name)
     if not value:
@@ -165,13 +228,10 @@ def _string_dict(value: Any) -> dict[str, str]:
 def _load_accounts(login_raw: dict[str, Any]) -> list[AccountConfig]:
     raw_accounts = login_raw.get("accounts")
     if raw_accounts is None:
-        return [
-            AccountConfig(
-                id="default",
-                username_env=str(login_raw.get("username_env", "CAMPUS_NET_USERNAME")),
-                password_env=str(login_raw.get("password_env", "CAMPUS_NET_PASSWORD")),
-            )
-        ]
+        env_accounts = _load_accounts_from_env(login_raw)
+        if env_accounts:
+            return env_accounts
+        return [_default_account(login_raw)]
     if not isinstance(raw_accounts, list):
         raise TypeError("Expected array for login.accounts")
 
@@ -195,6 +255,86 @@ def _load_accounts(login_raw: dict[str, Any]) -> list[AccountConfig]:
     return accounts
 
 
+def _load_accounts_from_env(login_raw: dict[str, Any]) -> list[AccountConfig]:
+    accounts_env_name = str(login_raw.get("accounts_env", "AUTOTIANGONG_ACCOUNTS"))
+    accounts_env = os.environ.get(accounts_env_name)
+    if accounts_env:
+        accounts = _parse_accounts_env(accounts_env)
+        if accounts:
+            _validate_unique_account_ids(accounts)
+            return accounts
+
+    discovered = [_default_account(login_raw)]
+    username_env = str(login_raw.get("username_env", "CAMPUS_NET_USERNAME"))
+    password_env = str(login_raw.get("password_env", "CAMPUS_NET_PASSWORD"))
+    primary_id = discovered[0].id
+    index = 2
+    while True:
+        numbered_username_env = f"{username_env}_{index}"
+        numbered_password_env = f"{password_env}_{index}"
+        if not os.environ.get(numbered_username_env) and not os.environ.get(numbered_password_env):
+            break
+        discovered.append(AccountConfig(f"{primary_id}-{index}", numbered_username_env, numbered_password_env))
+        index += 1
+
+    if len(discovered) > 1:
+        _validate_unique_account_ids(discovered)
+        return discovered
+    return []
+
+
+def _parse_accounts_env(value: str) -> list[AccountConfig]:
+    text = value.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        raw_accounts = json.loads(text)
+        if not isinstance(raw_accounts, list):
+            raise TypeError("Expected array for AUTOTIANGONG_ACCOUNTS")
+        accounts = []
+        for raw_account in raw_accounts:
+            if not isinstance(raw_account, dict):
+                raise TypeError("Expected object entries for AUTOTIANGONG_ACCOUNTS")
+            accounts.append(
+                AccountConfig(
+                    id=_required_nonempty_string(raw_account.get("id"), "AUTOTIANGONG_ACCOUNTS[].id"),
+                    username_env=_required_nonempty_string(
+                        raw_account.get("username_env"),
+                        "AUTOTIANGONG_ACCOUNTS[].username_env",
+                    ),
+                    password_env=_required_nonempty_string(
+                        raw_account.get("password_env"),
+                        "AUTOTIANGONG_ACCOUNTS[].password_env",
+                    ),
+                )
+            )
+        return accounts
+
+    accounts = []
+    for item in text.replace(";", ",").split(","):
+        raw_parts = [part.strip() for part in item.split(":")]
+        if len(raw_parts) != 3 or not all(raw_parts):
+            raise ValueError("AUTOTIANGONG_ACCOUNTS entries must be id:username_env:password_env")
+        accounts.append(AccountConfig(raw_parts[0], raw_parts[1], raw_parts[2]))
+    return accounts
+
+
+def _validate_unique_account_ids(accounts: list[AccountConfig]) -> None:
+    seen_ids: set[str] = set()
+    for account in accounts:
+        if account.id in seen_ids:
+            raise ValueError(f"Duplicate login account id: {account.id}")
+        seen_ids.add(account.id)
+
+
+def _default_account(login_raw: dict[str, Any]) -> AccountConfig:
+    return AccountConfig(
+        id=str(login_raw.get("active_account_id") or "default"),
+        username_env=str(login_raw.get("username_env", "CAMPUS_NET_USERNAME")),
+        password_env=str(login_raw.get("password_env", "CAMPUS_NET_PASSWORD")),
+    )
+
+
 def _validate_active_account(login: LoginConfig) -> None:
     if login.active_account_id is None:
         return
@@ -202,6 +342,28 @@ def _validate_active_account(login: LoginConfig) -> None:
     if login.active_account_id not in account_ids:
         valid_ids = ", ".join(account_ids)
         raise ValueError(f"login.active_account_id {login.active_account_id!r} is not in login.accounts. Valid ids: {valid_ids}")
+
+
+def _load_auto_switch(value: Any) -> AutoSwitchConfig:
+    if value is None:
+        return AutoSwitchConfig()
+    if not isinstance(value, dict):
+        raise TypeError("Expected object for login.auto_switch")
+
+    return AutoSwitchConfig(
+        enabled=bool(value.get("enabled", False)),
+        persist_success=bool(value.get("persist_success", True)),
+        strategy=_auto_switch_strategy(value.get("strategy", "round_robin")),
+        unavailable_state_path=str(value.get("unavailable_state_path", ".autotiangong-unavailable-accounts.json")),
+        unavailable_reset_days=max(0, int(value.get("unavailable_reset_days", 1))),
+    )
+
+
+def _auto_switch_strategy(value: Any) -> str:
+    strategy = str(value).replace("-", "_").lower()
+    if strategy not in {"round_robin", "random"}:
+        raise ValueError("login.auto_switch.strategy must be one of: round_robin, random")
+    return strategy
 
 
 def _load_logout(value: Any) -> LogoutConfig:
@@ -304,6 +466,12 @@ def _optional_string(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _required_nonempty_string(value: Any, field_name: str) -> str:

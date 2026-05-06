@@ -2,7 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET_SSID="360WiFi-E07A5C"
+TARGET_SSIDS=("360WiFi-E07A5C" "TGU")
+SSID_OVERRIDDEN=0
 TARGET_ROUTER_IP=""
 TARGET_ROUTER_MAC=""
 PYTHON_PATH=".venv/bin/python"
@@ -21,7 +22,8 @@ Usage: run_macos_wifi_trigger.sh [options]
 
 Options:
   --project-dir PATH      Project directory. Defaults to this script's parent.
-  --ssid SSID             Wi-Fi SSID that should trigger AutoTiangong.
+  --ssid SSID             Wi-Fi SSID that should trigger AutoTiangong. Repeat for multiple SSIDs.
+                          Defaults to 360WiFi-E07A5C and TGU.
   --router-ip IP          Fallback router IP to match when macOS redacts SSID.
   --router-mac MAC        Optional fallback router MAC to match with --router-ip.
   --python-path PATH      Python executable, relative to project dir unless absolute.
@@ -37,6 +39,53 @@ Options:
 USAGE
 }
 
+add_target_ssid() {
+    local ssid="$1"
+    if [[ -z "$ssid" ]]; then
+        echo "--ssid cannot be empty" >&2
+        exit 64
+    fi
+    if [[ "$SSID_OVERRIDDEN" -eq 0 ]]; then
+        TARGET_SSIDS=()
+        SSID_OVERRIDDEN=1
+    fi
+    TARGET_SSIDS+=("$ssid")
+}
+
+target_ssids_label() {
+    local label="" ssid
+    for ssid in "${TARGET_SSIDS[@]}"; do
+        if [[ -n "$label" ]]; then
+            label+=", "
+        fi
+        label+="$ssid"
+    done
+    printf '%s\n' "$label"
+}
+
+matches_target_ssid() {
+    local ssid="$1"
+    local target_ssid
+    for target_ssid in "${TARGET_SSIDS[@]}"; do
+        if [[ "$ssid" == "$target_ssid" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+matched_target_name() {
+    local identity="$1"
+    case "$identity" in
+        ssid:*)
+            printf '%s\n' "${identity#ssid:}"
+            ;;
+        *)
+            target_ssids_label
+            ;;
+    esac
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --project-dir)
@@ -44,7 +93,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --ssid)
-            TARGET_SSID="$2"
+            add_target_ssid "$2"
             shift 2
             ;;
         --router-ip)
@@ -102,6 +151,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${#TARGET_SSIDS[@]}" -eq 0 ]]; then
+    echo "At least one --ssid is required." >&2
+    exit 64
+fi
 
 resolve_path() {
     local value="$1"
@@ -194,8 +248,10 @@ network_identity() {
 matches_target_network() {
     local identity="$1"
     case "$identity" in
-        "ssid:$TARGET_SSID")
-            return 0
+        ssid:*)
+            if matches_target_ssid "${identity#ssid:}"; then
+                return 0
+            fi
             ;;
         "router:$TARGET_ROUTER_IP:"*)
             if [[ -z "$TARGET_ROUTER_IP" ]]; then
@@ -259,6 +315,8 @@ if [[ -z "$device" ]]; then
 fi
 
 identity="$(network_identity "$device")"
+target_label="$(target_ssids_label)"
+matched_label="$(matched_target_name "$identity")"
 last_identity="$(cat "$LAST_SSID_FILE" 2>/dev/null || true)"
 retry_count="$(cat "$RETRY_FILE" 2>/dev/null || printf '0')"
 if [[ ! "$retry_count" =~ ^[0-9]+$ ]]; then
@@ -271,7 +329,7 @@ if ! matches_target_network "$identity"; then
     printf '0\n' > "$RETRY_FILE"
     rm -f "$LAST_FAILURE_FILE"
     rm -f "$LAST_SUCCESS_LOG_FILE" "$SUPPRESSED_SUCCESS_FILE"
-    log_line "Current Wi-Fi identity is '${identity:-<none>}'; waiting for '$TARGET_SSID'."
+    log_line "Current Wi-Fi identity is '${identity:-<none>}'; waiting for one of: $target_label."
     exit 0
 fi
 
@@ -288,12 +346,12 @@ if [[ "$last_identity" == "$identity" && "$retry_count" -ge "$MAX_RETRIES" ]]; t
         last_failure_epoch=0
     fi
     if (( now_epoch - last_failure_epoch < RETRY_COOLDOWN_SECONDS )); then
-        log_line "Reached retry limit ($MAX_RETRIES) for current '$TARGET_SSID' connection ($identity); cooling down."
+        log_line "Reached retry limit ($MAX_RETRIES) for current '$matched_label' connection ($identity); cooling down."
         exit 0
     fi
     retry_count=0
     printf '0\n' > "$RETRY_FILE"
-    log_line "Retry cooldown elapsed for current '$TARGET_SSID' connection ($identity); probing again."
+    log_line "Retry cooldown elapsed for current '$matched_label' connection ($identity); probing again."
 fi
 
 args=(
@@ -348,7 +406,7 @@ if [[ "$exit_code" -eq 0 ]]; then
         if [[ "$suppressed_success_count" -gt 0 ]]; then
             suppressed_note=" Suppressed $suppressed_success_count repeated successful check(s) since last logged success."
         fi
-        log_line "Matched '$TARGET_SSID' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS.$suppressed_note"
+        log_line "Matched '$matched_label' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS.$suppressed_note"
         cat "$RUN_OUTPUT" >> "$LOG_FILE"
         log_line "AutoTiangong completed successfully."
         printf '%s\n' "$now_epoch" > "$LAST_SUCCESS_LOG_FILE"
@@ -363,7 +421,7 @@ fi
 retry_count=$((retry_count + 1))
 printf '%s\n' "$retry_count" > "$RETRY_FILE"
 date +%s > "$LAST_FAILURE_FILE"
-log_line "Matched '$TARGET_SSID' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS."
+log_line "Matched '$matched_label' as $identity; running AutoTiangong connectivity/login check with $PYTHON_ABS."
 cat "$RUN_OUTPUT" >> "$LOG_FILE"
 log_line "AutoTiangong exited with code $exit_code; retry $retry_count/$MAX_RETRIES."
 exit "$exit_code"

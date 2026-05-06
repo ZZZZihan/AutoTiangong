@@ -3,7 +3,8 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="com.autotiangong.wifi-trigger"
-TARGET_SSID="360WiFi-E07A5C"
+TARGET_SSIDS=("360WiFi-E07A5C" "TGU")
+SSID_OVERRIDDEN=0
 TARGET_ROUTER_IP=""
 TARGET_ROUTER_MAC=""
 PYTHON_PATH=".venv/bin/python"
@@ -24,12 +25,13 @@ usage() {
 Usage: install_macos_wifi_launch_agent.sh [options]
 
 Installs a per-user macOS LaunchAgent that runs AutoTiangong when the current
-Wi-Fi SSID becomes the target SSID.
+Wi-Fi SSID becomes a target SSID.
 
 Options:
   --project-dir PATH       Project directory. Defaults to this script's parent.
   --label LABEL            LaunchAgent label. Defaults to com.autotiangong.wifi-trigger.
-  --ssid SSID              Target Wi-Fi SSID. Defaults to 360WiFi-E07A5C.
+  --ssid SSID              Target Wi-Fi SSID. Repeat for multiple SSIDs.
+                           Defaults to 360WiFi-E07A5C and TGU.
   --router-ip IP           Fallback router IP to match when macOS redacts SSID.
   --router-mac MAC         Optional fallback router MAC to match with --router-ip.
   --python-path PATH       Python executable, relative to project dir unless absolute.
@@ -47,6 +49,19 @@ Options:
 USAGE
 }
 
+add_target_ssid() {
+    local ssid="$1"
+    if [[ -z "$ssid" ]]; then
+        echo "--ssid cannot be empty" >&2
+        exit 64
+    fi
+    if [[ "$SSID_OVERRIDDEN" -eq 0 ]]; then
+        TARGET_SSIDS=()
+        SSID_OVERRIDDEN=1
+    fi
+    TARGET_SSIDS+=("$ssid")
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --project-dir)
@@ -58,7 +73,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --ssid)
-            TARGET_SSID="$2"
+            add_target_ssid "$2"
             shift 2
             ;;
         --router-ip)
@@ -128,6 +143,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${#TARGET_SSIDS[@]}" -eq 0 ]]; then
+    echo "At least one --ssid is required." >&2
+    exit 64
+fi
 
 resolve_path() {
     local value="$1"
@@ -208,7 +228,6 @@ chmod +x "$RUNNER"
 program_args=(
     "$RUNNER"
     --project-dir "$PROJECT_DIR"
-    --ssid "$TARGET_SSID"
     --python-path "$PYTHON_ABS"
     --config "$CONFIG_ABS"
     --env-file "$ENV_ABS"
@@ -218,6 +237,9 @@ program_args=(
     --retry-cooldown "$RETRY_COOLDOWN_SECONDS"
     --success-log-interval "$SUCCESS_LOG_INTERVAL_SECONDS"
 )
+for target_ssid in "${TARGET_SSIDS[@]}"; do
+    program_args+=(--ssid "$target_ssid")
+done
 if [[ -n "$TARGET_ROUTER_IP" ]]; then
     program_args+=(--router-ip "$TARGET_ROUTER_IP")
 fi

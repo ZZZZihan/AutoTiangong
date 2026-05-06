@@ -76,7 +76,7 @@ python -m autotiangong --config config.local.json
 ```
 
 On macOS, install a Wi-Fi trigger that runs a lightweight AutoTiangong check
-while the current SSID is `360WiFi-E07A5C`:
+while the current SSID is `360WiFi-E07A5C` or `TGU`:
 
 ```bash
 ./scripts/install_macos_wifi_launch_agent.sh --install-deps --start-now
